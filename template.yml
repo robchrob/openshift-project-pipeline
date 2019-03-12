@@ -1,0 +1,211 @@
+apiVersion: v1
+kind: Template
+labels:
+  template: project-pipeline-template
+
+message: |-
+  A Jenkins server must be instantiated in this project to manage
+  the Pipeline BuildConfig created by this template.
+  You will be able to log in to it using your OpenShift user credentials.
+
+metadata:
+  annotations:
+    openshift.io/display-name: Pipeline Build Example
+    description: |-
+      This example showcases the new Jenkins Pipeline integration in OpenShift,
+      which performs continuous integration and deployment
+      right on the platform. The template contains a Jenkinsfile - a definition
+      of a multi-stage CI/CD process - that leverages the underlying OpenShift
+      platform for dynamic and scalable builds.
+      OpenShift integrates the status of your pipeline builds into the web
+      console allowing you to see your entire
+      application lifecycle in a single view.
+    iconClass: icon-jenkins
+    tags: instant-app,jenkins
+  name: jenkins-project-pipeline
+
+parameters:
+- description: The name assigned to all of the
+    frontend objects defined in this template.
+  displayName: Project
+  name: PROJECT
+  required: true
+  value: project
+
+- description: The URL of the repository with your application source code.
+  displayName: Git Repository URL
+  name: SRC_REPO_URL
+  required: true
+  value: https://github.com/redhat-developer/s2i-dotnetcore-ex.git
+
+- description: Set this to a branch name, tag or
+    other ref of your repository if you are not using the default branch.
+  displayName: Git Reference
+  name: SRC_REPO_REF
+
+- description: Set this to the relative path to your project if
+    it is not in the root of your repository.
+  displayName: Context Directory
+  name: CONTEXT_DIR
+
+- description: Github trigger secret. A difficult to guess string
+    encoded as part of the webhook URL. Not encrypted.
+  displayName: GitHub Webhook Secret
+  from: '[a-zA-Z0-9]{40}'
+  generate: expression
+  name: GITHUB_WEBHOOK_SECRET
+
+- description: A secret string used to configure the Generic webhook.
+  displayName: Generic Webhook Secret
+  from: '[a-zA-Z0-9]{40}'
+  generate: expression
+  name: GENERIC_WEBHOOK_SECRET
+
+- description: The OpenShift Namespace where the project ImageStreams reside.
+  displayName: Namespace
+  name: NAMESPACE
+  required: true
+  value: openshift
+
+objects:
+- apiVersion: v1
+  kind: BuildConfig
+
+  metadata:
+    annotations:
+      pipeline.alpha.openshift.io/uses: |-
+        '[{"name": "${PROJECT}-pipeline", "namespace": "", "kind": "DeploymentConfig"}]'
+    labels:
+      name: ${PROJECT}-pipeline-jenkins
+    name: ${PROJECT}-pipeline-jenkins
+
+  spec:
+    strategy:
+      jenkinsPipelineStrategy:
+        jenkinsfile: |-
+          pipeline
+          {
+              agent
+              {
+                label '${PROJECT}-base:latest'
+              }
+              stages
+              {
+                  stage('Build')
+                  {
+                      steps
+                      {
+                          script
+                          {
+                              openshift.withCluster()
+                              {
+                                  openshift.withProject()
+                                  {
+                                      def bld =
+                                          openshift.startBuild('${PROJECT}-pipeline-app') ;
+                                      bld.untilEach
+                                      {
+                                          return it.object().status.phase == "Running" ;
+                                      }
+                                      bld.logs('-f') ;
+                                  }
+                              }
+                          }
+                      }
+                  }
+                  stage('Deploy')
+                  {
+                      script
+                      {
+                          openshift.withCluster()
+                          {
+                              openshift.withProject()
+                              {
+                                  def dc =
+                                    openshift.selector('dc', '${PROJECT}-pipeline-app') ;
+                                  dc.rollout().latest() ;
+                              }
+                          }
+                      }
+                  }
+              }
+          }
+      type: JenkinsPipeline
+
+    triggers:
+    - github:
+        secret: secret101
+      type: GitHub
+    - generic:
+        secret: secret101
+      type: Generic
+
+- apiVersion: v1
+  kind: ImageStream
+  metadata:
+    annotations:
+      description: Keeps track of changes in the application image
+    name: ${PROJECT}-pipeline-imagestream
+
+- apiVersion: v1
+  kind: BuildConfig
+  metadata:
+    annotations:
+      description: Defines how to build the application
+    name: ${PROJECT}-pipeline-app
+  spec:
+    output:
+      to:
+        kind: ImageStreamTag
+        name: ${PROJECT}-bin:latest
+    source:
+      contextDir: ${CONTEXT_DIR}
+      git:
+        ref: ${SRC_REPO_REF}
+        uri: ${SRC_REPO_URL}
+      type: Git
+    strategy:
+      sourceStrategy:
+        from:
+          kind: ImageStreamTag
+          name: ${PROJECT}-base:latest
+          namespace: ${NAMESPACE}
+      type: Source
+
+    triggers:
+    - github:
+        secret: ${GITHUB_WEBHOOK_SECRET}
+      type: GitHub
+    - generic:
+        secret: ${GENERIC_WEBHOOK_SECRET}
+      type: Generic
+
+- apiVersion: v1
+  kind: DeploymentConfig
+
+  metadata:
+    annotations:
+      description: Defines how to deploy the application server
+    name: ${PROJECT}-pipeline-deploymentconfig
+
+  spec:
+    replicas: 1
+    selector:
+      name: ${PROJECT}-pipeline-deploy
+    strategy:
+      type: Rolling
+    template:
+      metadata:
+        labels:
+          name: ${PROJECT}-pipeline-deploy
+        name: ${PROJECT}-pipeline-deply
+    triggers:
+    - imageChangeParams:
+        automatic: false
+        containerNames:
+        - ${PROJECT}-pipeline-deploy
+        from:
+          kind: ImageStreamTag
+          name: ${PROJECT}-bin:latest
+      type: ImageChange
+    - type: ConfigChange
