@@ -21,8 +21,8 @@ metadata:
       console allowing you to see your entire
       application lifecycle in a single view.
     iconClass: icon-jenkins
-    tags: instant-app,jenkins
-  name: jenkins-project-pipeline
+    tags: generic
+  name: project-pipeline
 
 parameters:
 - description: The name assigned to all of the
@@ -36,12 +36,13 @@ parameters:
   displayName: Git Repository URL
   name: SRC_REPO_URL
   required: true
-  value: https://github.com/redhat-developer/s2i-dotnetcore-ex.git
+  value: https://github.com/robchrob/openshift-project-pipeline.git
 
 - description: Set this to a branch name, tag or
     other ref of your repository if you are not using the default branch.
   displayName: Git Reference
   name: SRC_REPO_REF
+  value: develop
 
 - description: Set this to the relative path to your project if
     it is not in the root of your repository.
@@ -61,23 +62,63 @@ parameters:
   generate: expression
   name: GENERIC_WEBHOOK_SECRET
 
-- description: The OpenShift Namespace where the project ImageStreams reside.
-  displayName: Namespace
-  name: NAMESPACE
+- description: Image to run as base.
+  displayName: Image base
+  name: FROM_IMG
   required: true
-  value: openshift
+  value: origin-jenkins-agent-base:latest
 
 objects:
+- apiVersion: v1
+  kind: ConfigMap
+  data:
+    template1: |-
+      <org.csanchez.jenkins.plugins.kubernetes.PodTemplate>
+        <inheritFrom></inheritFrom>
+        <name>base</name>
+        <instanceCap>2147483647</instanceCap>
+        <idleMinutes>0</idleMinutes>
+        <label>base</label>
+        <serviceAccount>jenkins</serviceAccount>
+        <nodeSelector></nodeSelector>
+        <volumes/>
+        <containers>
+          <org.csanchez.jenkins.plugins.kubernetes.ContainerTemplate>
+            <name>jnlp</name>
+            <image>openshift/${FROM_IMG}</image>
+            <privileged>false</privileged>
+            <alwaysPullImage>false</alwaysPullImage>
+            <workingDir>/tmp</workingDir>
+            <command></command>
+            <args>${computer.jnlpmac} ${computer.name}</args>
+            <ttyEnabled>false</ttyEnabled>
+            <resourceRequestCpu></resourceRequestCpu>
+            <resourceRequestMemory></resourceRequestMemory>
+            <resourceLimitCpu></resourceLimitCpu>
+            <resourceLimitMemory></resourceLimitMemory>
+            <envVars/>
+          </org.csanchez.jenkins.plugins.kubernetes.ContainerTemplate>
+        </containers>
+        <envVars/>
+        <annotations/>
+        <imagePullSecrets/>
+        <nodeProperties/>
+      </org.csanchez.jenkins.plugins.kubernetes.PodTemplate>
+  metadata:
+    labels:
+      role: jenkins-slave
+    name: jenkins-plugin
+
 - apiVersion: v1
   kind: BuildConfig
 
   metadata:
     annotations:
       pipeline.alpha.openshift.io/uses: |-
-        '[{"name": "${PROJECT}-pipeline", "namespace": "", "kind": "DeploymentConfig"}]'
+        '[{"name": "${PROJECT}", "namespace": "", "kind": "DeploymentConfig"}]'
     labels:
-      name: ${PROJECT}-pipeline-jenkins
-    name: ${PROJECT}-pipeline-jenkins
+      name: ${PROJECT}-pipeline
+    name: ${PROJECT}-pipeline
 
   spec:
     strategy:
@@ -87,7 +128,7 @@ objects:
           {
               agent
               {
-                label '${PROJECT}-base:latest'
+                  label 'base'
               }
               stages
               {
@@ -102,28 +143,13 @@ objects:
                                   openshift.withProject()
                                   {
                                       def bld =
-                                          openshift.startBuild('${PROJECT}-pipeline-app') ;
+                                          openshift.startBuild('${PROJECT}-build') ;
                                       bld.untilEach
                                       {
                                           return it.object().status.phase == "Running" ;
                                       }
                                       bld.logs('-f') ;
                                   }
-                              }
-                          }
-                      }
-                  }
-                  stage('Deploy')
-                  {
-                      script
-                      {
-                          openshift.withCluster()
-                          {
-                              openshift.withProject()
-                              {
-                                  def dc =
-                                    openshift.selector('dc', '${PROJECT}-pipeline-app') ;
-                                  dc.rollout().latest() ;
                               }
                           }
                       }
@@ -141,23 +167,12 @@ objects:
       type: Generic
 
 - apiVersion: v1
-  kind: ImageStream
-  metadata:
-    annotations:
-      description: Keeps track of changes in the application image
-    name: ${PROJECT}-pipeline-imagestream
-
-- apiVersion: v1
   kind: BuildConfig
   metadata:
     annotations:
       description: Defines how to build the application
-    name: ${PROJECT}-pipeline-app
+    name: ${PROJECT}-build
   spec:
-    output:
-      to:
-        kind: ImageStreamTag
-        name: ${PROJECT}-bin:latest
     source:
       contextDir: ${CONTEXT_DIR}
       git:
@@ -166,10 +181,13 @@ objects:
       type: Git
     strategy:
       sourceStrategy:
+        env:
+          - name: "BUILD_LOGLEVEL"
+            value: "5"
         from:
           kind: ImageStreamTag
-          name: ${PROJECT}-base:latest
-          namespace: ${NAMESPACE}
+          name: openshift/${FROM_IMG}
+          namespace: openshift
       type: Source
 
     triggers:
@@ -179,33 +197,3 @@ objects:
     - generic:
         secret: ${GENERIC_WEBHOOK_SECRET}
       type: Generic
-
-- apiVersion: v1
-  kind: DeploymentConfig
-
-  metadata:
-    annotations:
-      description: Defines how to deploy the application server
-    name: ${PROJECT}-pipeline-deploymentconfig
-
-  spec:
-    replicas: 1
-    selector:
-      name: ${PROJECT}-pipeline-deploy
-    strategy:
-      type: Rolling
-    template:
-      metadata:
-        labels:
-          name: ${PROJECT}-pipeline-deploy
-        name: ${PROJECT}-pipeline-deply
-    triggers:
-    - imageChangeParams:
-        automatic: false
-        containerNames:
-        - ${PROJECT}-pipeline-deploy
-        from:
-          kind: ImageStreamTag
-          name: ${PROJECT}-bin:latest
-      type: ImageChange
-    - type: ConfigChange
